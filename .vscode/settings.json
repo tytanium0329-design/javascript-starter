@@ -1,32 +1,314 @@
-{
-  "editor.formatOnSave": true,
-  "files.autoSave": "onFocusChange",
-  "eslint.validate": ["javascript"],
-  "editor.codeActionsOnSave": {
-    "source.fixAll.eslint": "explicit"
-  },
-  "workbench.colorCustomizations": {
-    "xterminal.background": "#282936",
-    "xterminal.foreground": "#E9E9F4",
-    "terminalCursor.background": "#E9E9F4",
-    "terminalCursor.foreground": "#E9E9F4",
-    "terminal.ansiBlack": "#282936",
-    "terminal.ansiBlue": "#62D6E8",
-    "terminal.ansiBrightBlack": "#626483",
-    "terminal.ansiBrightBlue": "#62D6E8",
-    "terminal.ansiBrightCyan": "#A1EFE4",
-    "terminal.ansiBrightGreen": "#EBFF87",
-    "terminal.ansiBrightMagenta": "#B45BCF",
-    "terminal.ansiBrightRed": "#EA51B2",
-    "terminal.ansiBrightWhite": "#F7F7FB",
-    "terminal.ansiBrightYellow": "#00F769",
-    "terminal.ansiCyan": "#A1EFE4",
-    "terminal.ansiGreen": "#EBFF87",
-    "terminal.ansiMagenta": "#B45BCF",
-    "terminal.ansiRed": "#EA51B2",
-    "terminal.ansiWhite": "#E9E9F4",
-    "terminal.ansiYellow": "#00F769",
-    "terminal.background": "#282936",
-    "terminal.foreground": "#E9E9F4"
-  }
+import os
+
+project_name = "ai_glasses_assistant"
+os.makedirs(project_name, exist_ok=True)
+
+files_content = {
+    "requirements.txt": """
+openai
+openai-whisper
+sounddevice
+scipy
+gtts
+playsound==1.2.2
+deep-translator
+langchain
+chromadb
+opencv-python
+face_recognition
+ultralytics
+fer
+""".strip(),
+
+    "config.py": '''
+OPENAI_API_KEY = "your-openai-api-key"
+PREFERRED_LANGUAGE = "en"
+WHISPER_MODEL = "base"
+USE_LOCAL_LLM = False  # Change to True to use local LLM instead of OpenAI
+'''.strip(),
+
+    "audio.py": '''
+import sounddevice as sd
+from scipy.io.wavfile import write
+import whisper
+import config
+
+MODEL = whisper.load_model(config.WHISPER_MODEL)
+FILENAME = "temp_audio.wav"
+DURATION = 5
+FS = 44100
+
+def record_audio(duration=DURATION, filename=FILENAME):
+    print("[Mic] Recording...")
+    audio = sd.rec(int(duration * FS), samplerate=FS, channels=1)
+    sd.wait()
+    write(filename, FS, audio)
+    print("[Mic] Recording done.")
+
+def transcribe_audio(filename=FILENAME):
+    print("[Whisper] Transcribing...")
+    result = MODEL.transcribe(filename)
+    return result["text"]
+'''.strip(),
+
+    "translation.py": '''
+from deep_translator import GoogleTranslator
+
+def detect_and_translate(text, target_lang="en"):
+    detected_lang = GoogleTranslator().detect(text)
+    if detected_lang == target_lang:
+        return text, detected_lang
+    translation = GoogleTranslator(source='auto', target=target_lang).translate(text)
+    return translation, detected_lang
+'''.strip(),
+
+    "memory.py": '''
+from langchain.vectorstores import Chroma
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.chains import ConversationalRetrievalChain
+from langchain.llms import OpenAI
+
+import config
+import openai
+
+openai.api_key = config.OPENAI_API_KEY
+
+embeddings = OpenAIEmbeddings()
+persist_directory = "memory_db"
+
+memory_db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+retriever = memory_db.as_retriever(search_kwargs={"k": 3})
+
+chat_model = OpenAI(model_name="gpt-4")
+
+conversational_chain = ConversationalRetrievalChain.from_llm(
+    llm=chat_model,
+    retriever=retriever,
+    return_source_documents=True,
+)
+
+def add_to_memory(text):
+    """Add text to persistent memory DB"""
+    memory_db.add_texts([text])
+    memory_db.persist()
+
+def query_memory(query):
+    """Return top matching memory documents"""
+    result = memory_db.similarity_search(query, k=3)
+    return result
+
+def chat_with_memory(question):
+    """Chat with memory retrieval"""
+    result = conversational_chain({"question": question})
+    answer = result['answer']
+    sources = result['source_documents']
+    return answer, sources
+'''.strip(),
+
+    "vision.py": '''
+import cv2
+import face_recognition
+from ultralytics import YOLO
+from fer import FER
+
+# Load YOLOv8 model for object detection
+yolo_model = YOLO('yolov8n.pt')
+
+# Load known faces
+known_face_encodings = []
+known_face_names = []
+
+emotion_detector = FER(mtcnn=True)
+
+def load_known_faces():
+    global known_face_encodings, known_face_names
+    # Add known faces here with their images and names
+    # Example:
+    image = face_recognition.load_image_file("faces/john.jpg")
+    known_face_encodings.append(face_recognition.face_encodings(image)[0])
+    known_face_names.append("John Doe")
+
+def recognize_faces(frame):
+    rgb_frame = frame[:, :, ::-1]
+    face_locations = face_recognition.face_locations(rgb_frame)
+    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+    names = []
+
+    for encoding in face_encodings:
+        matches = face_recognition.compare_faces(known_face_encodings, encoding)
+        name = "Unknown"
+        if True in matches:
+            first_match_index = matches.index(True)
+            name = known_face_names[first_match_index]
+        names.append(name)
+    return names
+
+def detect_objects(frame):
+    results = yolo_model(frame)
+    labels = results[0].names
+    detected_objects = [labels[int(x)] for x in results[0].boxes.cls]
+    return detected_objects
+
+def detect_emotions(frame):
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    emotions = emotion_detector.detect_emotions(rgb_frame)
+    detected_emotions = []
+    for face in emotions:
+        emotions_scores = face["emotions"]
+        top_emotion = max(emotions_scores, key=emotions_scores.get)
+        detected_emotions.append(top_emotion)
+    return detected_emotions
+'''.strip(),
+
+    "local_llm.py": '''
+import subprocess
+
+def ask_local_llm(prompt):
+    """
+    Calls local llama.cpp or similar model CLI and returns response.
+    Adjust the CLI command and model path as needed.
+    """
+    try:
+        process = subprocess.Popen(
+            ['./main', '-m', 'mistral-7b.ggml', '-p', prompt, '-n', '128', '--temp', '0.7'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = process.communicate(timeout=30)
+        if stderr:
+            print("[Local LLM] Error:", stderr)
+        return stdout.strip()
+    except Exception as e:
+        print("[Local LLM] Exception:", e)
+        return "Sorry, local model is unavailable right now."
+'''.strip(),
+
+    "main.py": '''
+import os
+import audio
+import translation
+import memory
+import vision
+import config
+import openai
+from gtts import gTTS
+import tempfile
+import playsound
+import cv2
+import local_llm
+
+openai.api_key = config.OPENAI_API_KEY
+
+def speak(text):
+    print("[Speak]", text)
+    tts = gTTS(text)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+        tts.save(fp.name)
+        playsound.playsound(fp.name)
+        os.unlink(fp.name)
+
+def ask_llm(prompt):
+    if config.USE_LOCAL_LLM:
+        return local_llm.ask_local_llm(prompt)
+    else:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content.strip()
+
+def main():
+    print("Loading vision models and known faces...")
+    vision.load_known_faces()
+
+    cap = cv2.VideoCapture(0)  # Webcam
+
+    print("Assistant running. Press Ctrl+C to quit.")
+
+    while True:
+        try:
+            audio.record_audio()
+            spoken_text = audio.transcribe_audio()
+
+            if not spoken_text.strip():
+                print("[Warning] No speech detected. Listening again...")
+                continue
+
+            print("[You said]", spoken_text)
+
+            # Translate if needed
+            translated_text, detected_lang = translation.detect_and_translate(spoken_text, config.PREFERRED_LANGUAGE)
+            if detected_lang != config.PREFERRED_LANGUAGE:
+                print(f"[Translation] Detected {detected_lang} → Translated: {translated_text}")
+            else:
+                print("[Translation] No translation needed.")
+
+            # Query memory to get context
+            context_docs = memory.query_memory(translated_text)
+            context_texts = "\\n".join([doc.page_content for doc in context_docs])
+            prompt = f"{context_texts}\\nUser: {translated_text}\\nAssistant:"
+
+            # Get AI response
+            answer = ask_llm(prompt)
+            print("[Assistant]", answer)
+
+            # Add Q&A to memory
+            memory.add_to_memory(f"User: {translated_text}\\nAssistant: {answer}")
+
+            # Speak response
+            speak(answer)
+
+            # Vision: detect faces, objects, emotions
+            ret, frame = cap.read()
+            if not ret:
+                print("[Error] Cannot access webcam")
+                continue
+
+            faces = vision.recognize_faces(frame)
+            objects = vision.detect_objects(frame)
+            emotions = vision.detect_emotions(frame)
+
+            if faces:
+                print(f"[Vision] Recognized faces: {faces}")
+            if objects:
+                print(f"[Vision] Detected objects: {objects}")
+            if emotions:
+                print(f"[Vision] Detected emotions: {emotions}")
+
+        except KeyboardInterrupt:
+            print("Exiting assistant...")
+            break
+        except Exception as e:
+            print("[Error]", e)
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
+'''.strip()
 }
+
+# Create folders
+faces_path = os.path.join(project_name, "faces")
+os.makedirs(faces_path, exist_ok=True)
+
+# Create a placeholder face image instruction file
+with open(os.path.join(faces_path, "README.md"), "w") as f:
+    f.write("# Add your known face images here\n")
+    f.write("Place .jpg images of people you want your AI to recognize in this folder.\n")
+    f.write("Example filename: john.jpg\n")
+
+# Create files
+for filename, content in files_content.items():
+    path = os.path.join(project_name, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+print(f"Project '{project_name}' created successfully!")
+print("Next steps:")
+print(f"1. Add your OpenAI API key to {project_name}/config.py")
+print(f"2. Add known faces images to {project_name}/faces/")
+print(f"3. Install dependencies: pip install -r {project_name}/requirements.txt")
+print(f"4. Run the assistant: python {project_name}/main.py")
